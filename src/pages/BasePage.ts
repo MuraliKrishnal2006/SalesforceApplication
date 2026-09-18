@@ -1,63 +1,227 @@
-import {Page, Locator,expect} from '@playwright/test';
- 
+import { Page, Locator, expect } from '@playwright/test';
+import { healLocator } from '../utils/locatorHeal';
+
 /**
  * BasePage — shared foundation for every Page Object in the framework.
  * All page classes extend this instead of duplicating common Playwright
- * actions, so a fix or improvement here (e.g. a better wait strategy)
- * automatically applies to every page.
+ * actions.
  */
-
 export class BasePage {
-    readonly page :Page;
-     
+    readonly page: Page;
 
-    constructor(page :Page){
+    constructor(page: Page) {
         this.page = page;
-         
     }
-    //Navigates to a relative path off the configured baseURL.
 
-    async goto(path : string='/') : Promise<void>{
+    // ============================================================
+    // Navigation
+    // ============================================================
+
+    async goto(path: string = '/'): Promise<void> {
         await this.page.goto(path);
     }
-     /**
-     * Waits for a locator to be visible before any interaction is attempted.
-     * Centralizing this avoids repeating waitFor() in every page method.
-     */
-    async waitForElement(locator : Locator) : Promise<void>{
-        await locator.waitFor({state : 'visible'});
-    }
-    //Fills a text field, but only after confirming it's visible
-    async fill(locator : Locator, value : string) : Promise<void>{
-        await this.waitForElement(locator);
-        await locator.fill(value);   
-    }
-    
-    /**
-     * Defensive click wrapper — this is the core reliability mechanism
-     * of the whole framework:
-     *  1. wait until visible
-     *  2. scroll it into view (handles elements below the fold)
-     *  3. assert it's actually enabled (catches disabled/loading buttons
-     *     that are technically "visible" but not yet clickable)
-     *  4. only then click
-     * This sequence directly fixed a real flaky-click bug found during
-     * CI testing — see AddEmployee.ts history / README for details.
-     */
 
-    async click(locator : Locator) : Promise<void>{
-        await locator.waitFor({state : 'visible'});
+    // ============================================================
+    // Standard Wait
+    // ============================================================
+
+    async waitForElement(locator: Locator): Promise<void> {
+        await locator.waitFor({
+            state: 'visible'
+        });
+    }
+
+    // ============================================================
+    // Standard Fill
+    // ============================================================
+
+    async fill(
+        locator: Locator,
+        value: string
+    ): Promise<void> {
+
+        await this.waitForElement(locator);
+
+        await locator.fill(value);
+    }
+
+    // ============================================================
+    // Standard Click
+    // ============================================================
+
+    async click(locator: Locator): Promise<void> {
+
+        await locator.waitFor({
+            state: 'visible'
+        });
+
         await locator.scrollIntoViewIfNeeded();
+
         await expect(locator).toBeEnabled();
+
         await locator.click();
     }
-     /**
-     * Reads and trims the visible text of an element.
-     * Falls back to an empty string if textContent() returns null,
-     * so callers never have to null-check the result themselves.
-     */
-    async getText(locator : Locator) : Promise<string>{
+
+    // ============================================================
+    // Get Text
+    // ============================================================
+
+    async getText(locator: Locator): Promise<string> {
+
         await this.waitForElement(locator);
-        return (await locator.textContent())?.trim() ?? '';
+
+        return (
+            await locator.textContent()
+        )?.trim() ?? '';
+    }
+
+    // ============================================================
+    // AUTO-HEALING CLICK
+    // ============================================================
+
+    async healClick(
+        candidates: Locator[]
+    ): Promise<void> {
+
+        const locator =
+            await this.getHealedLocator(candidates);
+
+        await locator.waitFor({
+            state: 'visible'
+        });
+
+        await locator.scrollIntoViewIfNeeded();
+
+        await expect(locator).toBeEnabled();
+
+        await locator.click();
+    }
+
+    // ============================================================
+    // AUTO-HEALING FILL
+    // ============================================================
+
+    async healFill(
+        candidates: Locator[],
+        value: string
+    ): Promise<void> {
+
+        const locator =
+            await this.getHealedLocator(candidates);
+
+        await locator.waitFor({
+            state: 'visible'
+        });
+
+        await locator.fill(value);
+    }
+
+    // ============================================================
+    // AUTO-HEALING TEXT
+    // ============================================================
+
+    async healGetText(
+        candidates: Locator[]
+    ): Promise<string> {
+
+        const locator =
+            await this.getHealedLocator(candidates);
+
+        await locator.waitFor({
+            state: 'visible'
+        });
+
+        return (
+            await locator.textContent()
+        )?.trim() ?? '';
+    }
+
+    // ============================================================
+    // AUTO-HEALING LOCATOR
+    // ============================================================
+
+    async getHealedLocator(
+        candidates: Locator[]
+    ): Promise<Locator> {
+
+        /*
+         * Salesforce Lightning can take some time to render
+         * the next field after a dropdown selection.
+         *
+         * Retry the healing operation for up to 8 seconds.
+         */
+
+        const endTime =
+            Date.now() + 8000;
+
+        let lastError: unknown = null;
+
+        while (Date.now() < endTime) {
+
+            // ----------------------------------------------------
+            // Stop if page is closed
+            // ----------------------------------------------------
+
+            if (this.page.isClosed()) {
+
+                throw new Error(
+                    'Cannot find healed locator because the page is closed.'
+                );
+            }
+
+            try {
+
+                // ------------------------------------------------
+                // Call existing healing utility
+                // ------------------------------------------------
+
+                const locator =
+                    await healLocator(candidates);
+
+                // ------------------------------------------------
+                // Make sure locator is still visible
+                // ------------------------------------------------
+
+                if (await locator.isVisible()) {
+                    return locator;
+                }
+
+            } catch (error) {
+
+                lastError = error;
+            }
+
+            // ----------------------------------------------------
+            // Give Salesforce time to finish rendering
+            // ----------------------------------------------------
+
+            try {
+
+                await this.page.waitForTimeout(300);
+
+            } catch {
+
+                if (this.page.isClosed()) {
+
+                    throw new Error(
+                        'Cannot find healed locator because the page is closed.'
+                    );
+                }
+            }
+        }
+
+        // ========================================================
+        // Healing failed
+        // ========================================================
+
+        let errorMessage =
+            'Unable to find a visible healed locator after 8 seconds.';
+
+        if (lastError instanceof Error) {
+            errorMessage +=
+                ` Last error: ${lastError.message}`;
+        }
+
+        throw new Error(errorMessage);
     }
 }
